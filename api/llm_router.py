@@ -1,9 +1,12 @@
 """
 LLM Router - Routes requests to different LLM providers
-Supports: OpenAI, Anthropic, Groq, Local models
+Supports: OpenAI, Anthropic, Google, Groq, Local models
+Enhanced with real API integration
 """
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List
+from .models import Integration, Conversation, ChatMessage
+from .encryption_service import decrypt_api_key
 
 
 # Supported LLM models
@@ -53,9 +56,47 @@ def get_provider(model_name: str) -> str:
     return 'echo'
 
 
+def call_llm_with_conversation(conversation: Conversation, user_message: str, api_key: str) -> Dict[str, Any]:
+    """
+    Route LLM call to appropriate provider with full conversation context
+    Requirements 15.1, 15.2, 15.6, 15.7
+    
+    Args:
+        conversation: Conversation object
+        user_message: Current user message
+        api_key: Decrypted API key for the provider
+        
+    Returns:
+        Dict with reply, model_used, tokens, provider, status
+    """
+    # Build context
+    context = build_context(conversation, user_message)
+    
+    # Get provider from model_id
+    model_id = conversation.model_id
+    provider = get_provider(model_id)
+    
+    # Extract actual model name
+    model_name = model_id.replace('model-', '')
+    
+    # Route to appropriate provider
+    if provider == 'openai':
+        return call_openai(model_name, "", api_key=api_key, context=context)
+    elif provider == 'anthropic':
+        return call_anthropic(model_name, "", api_key=api_key, context=context)
+    elif provider == 'google':
+        return call_google(model_name, "", api_key=api_key, context=context)
+    elif provider == 'groq':
+        return call_groq(model_name, user_message)
+    elif provider == 'local':
+        return call_local(model_name, user_message)
+    else:
+        return call_echo(model_name, user_message, user_message)
+
+
 def call_llm(model_name: str, prompt: str, context: str = "") -> Dict[str, Any]:
     """
-    Route LLM call to appropriate provider
+    Route LLM call to appropriate provider (legacy function for backward compatibility)
     
     Args:
         model_name: Name of the LLM model to use
@@ -74,6 +115,8 @@ def call_llm(model_name: str, prompt: str, context: str = "") -> Dict[str, Any]:
         return call_openai(model_name, full_prompt)
     elif provider == 'anthropic':
         return call_anthropic(model_name, full_prompt)
+    elif provider == 'google':
+        return call_google(model_name, full_prompt)
     elif provider == 'groq':
         return call_groq(model_name, full_prompt)
     elif provider == 'local':
@@ -83,44 +126,260 @@ def call_llm(model_name: str, prompt: str, context: str = "") -> Dict[str, Any]:
         return call_echo(model_name, full_prompt, prompt)
 
 
-def call_openai(model: str, prompt: str) -> Dict[str, Any]:
+def build_context(conversation: Conversation, user_message: str) -> Dict[str, Any]:
+    """
+    Build context for AI model including system prompt, injected memories, and history
+    Requirements 15.2, 15.5, 15.6
+    """
+    system_prompt = "You are a helpful AI assistant in the Chimera Protocol system."
+    
+    # Get injected memories
+    injected_memories = conversation.injected_memory_links.select_related('memory').all()
+    memories_text = ""
+    
+    if injected_memories.exists():
+        memories_text = "\n\n=== Injected Context ===\n"
+        for link in injected_memories:
+            memory = link.memory
+            memories_text += f"\n[{memory.title}]\n{memory.content}\n"
+        memories_text += "\n=== End Context ===\n"
+    
+    # Get conversation history (last 10 messages)
+    history_messages = conversation.messages.order_by('-timestamp')[:10]
+    history_messages = list(reversed(history_messages))
+    
+    return {
+        'system_prompt': system_prompt,
+        'memories_text': memories_text,
+        'history': history_messages,
+        'user_message': user_message
+    }
+
+
+def call_openai(model: str, prompt: str, api_key: str = None, context: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Call OpenAI API
-    
-    Note: Requires OPENAI_API_KEY in environment
-    For demo, returns placeholder
+    Requirements 15.3: Use openai library to call chat completion API
     """
-    # TODO: Implement actual OpenAI API call
-    # import openai
-    # response = openai.ChatCompletion.create(...)
+    try:
+        import openai
+        
+        if not api_key:
+            api_key = os.getenv('OPENAI_API_KEY')
+        
+        if not api_key:
+            return {
+                'reply': f"[OpenAI {model}] No API key provided",
+                'model_used': model,
+                'provider': 'openai',
+                'tokens': 0,
+                'status': 'error',
+                'error': 'No API key'
+            }
+        
+        # Build messages
+        messages = []
+        
+        if context:
+            system_content = context['system_prompt']
+            if context['memories_text']:
+                system_content += context['memories_text']
+            messages.append({'role': 'system', 'content': system_content})
+            
+            for msg in context['history']:
+                messages.append({'role': msg.role, 'content': msg.content})
+            
+            messages.append({'role': 'user', 'content': context['user_message']})
+        else:
+            messages.append({'role': 'user', 'content': prompt})
+        
+        # Call OpenAI API
+        client = openai.OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2000
+        )
+        
+        assistant_message = response.choices[0].message.content
+        tokens = response.usage.total_tokens if response.usage else 0
+        
+        return {
+            'reply': assistant_message,
+            'model_used': response.model,
+            'provider': 'openai',
+            'tokens': tokens,
+            'status': 'success'
+        }
     
-    return {
-        'reply': f"[OpenAI {model}] This is a placeholder response. Integrate OpenAI API for production.",
-        'model_used': model,
-        'provider': 'openai',
-        'tokens': 0,
-        'status': 'demo_mode'
-    }
+    except ImportError:
+        return {
+            'reply': f"[OpenAI {model}] openai library not installed",
+            'model_used': model,
+            'provider': 'openai',
+            'tokens': 0,
+            'status': 'error',
+            'error': 'Library not installed'
+        }
+    except Exception as e:
+        return {
+            'reply': f"[OpenAI {model}] Error: {str(e)}",
+            'model_used': model,
+            'provider': 'openai',
+            'tokens': 0,
+            'status': 'error',
+            'error': str(e)
+        }
 
 
-def call_anthropic(model: str, prompt: str) -> Dict[str, Any]:
+def call_anthropic(model: str, prompt: str, api_key: str = None, context: Dict[str, Any] = None) -> Dict[str, Any]:
     """
     Call Anthropic Claude API
-    
-    Note: Requires ANTHROPIC_API_KEY in environment
-    For demo, returns placeholder
+    Requirements 15.4: Use anthropic library to call messages API
     """
-    # TODO: Implement actual Anthropic API call
-    # import anthropic
-    # response = anthropic.Anthropic().messages.create(...)
+    try:
+        import anthropic
+        
+        if not api_key:
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+        
+        if not api_key:
+            return {
+                'reply': f"[Anthropic {model}] No API key provided",
+                'model_used': model,
+                'provider': 'anthropic',
+                'tokens': 0,
+                'status': 'error',
+                'error': 'No API key'
+            }
+        
+        # Build system prompt and messages
+        system_content = "You are a helpful AI assistant."
+        messages = []
+        
+        if context:
+            system_content = context['system_prompt']
+            if context['memories_text']:
+                system_content += context['memories_text']
+            
+            for msg in context['history']:
+                if msg.role != 'system':
+                    messages.append({'role': msg.role, 'content': msg.content})
+            
+            messages.append({'role': 'user', 'content': context['user_message']})
+        else:
+            messages.append({'role': 'user', 'content': prompt})
+        
+        # Call Anthropic API
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model,
+            system=system_content,
+            messages=messages,
+            max_tokens=2000
+        )
+        
+        assistant_message = response.content[0].text
+        tokens = response.usage.input_tokens + response.usage.output_tokens
+        
+        return {
+            'reply': assistant_message,
+            'model_used': response.model,
+            'provider': 'anthropic',
+            'tokens': tokens,
+            'status': 'success'
+        }
     
-    return {
-        'reply': f"[Anthropic {model}] This is a placeholder response. Integrate Anthropic API for production.",
-        'model_used': model,
-        'provider': 'anthropic',
-        'tokens': 0,
-        'status': 'demo_mode'
-    }
+    except ImportError:
+        return {
+            'reply': f"[Anthropic {model}] anthropic library not installed",
+            'model_used': model,
+            'provider': 'anthropic',
+            'tokens': 0,
+            'status': 'error',
+            'error': 'Library not installed'
+        }
+    except Exception as e:
+        return {
+            'reply': f"[Anthropic {model}] Error: {str(e)}",
+            'model_used': model,
+            'provider': 'anthropic',
+            'tokens': 0,
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+def call_google(model: str, prompt: str, api_key: str = None, context: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    Call Google AI API
+    Requirements 15.5: Use google-generativeai library
+    """
+    try:
+        import google.generativeai as genai
+        
+        if not api_key:
+            api_key = os.getenv('GOOGLE_AI_API_KEY')
+        
+        if not api_key:
+            return {
+                'reply': f"[Google {model}] No API key provided",
+                'model_used': model,
+                'provider': 'google',
+                'tokens': 0,
+                'status': 'error',
+                'error': 'No API key'
+            }
+        
+        genai.configure(api_key=api_key)
+        
+        # Build full prompt
+        full_prompt = ""
+        if context:
+            full_prompt = context['system_prompt']
+            if context['memories_text']:
+                full_prompt += "\n" + context['memories_text']
+            
+            if context['history']:
+                full_prompt += "\n\n=== Conversation History ===\n"
+                for msg in context['history']:
+                    full_prompt += f"{msg.role}: {msg.content}\n"
+            
+            full_prompt += f"\n\nUser: {context['user_message']}"
+        else:
+            full_prompt = prompt
+        
+        # Call Google AI API
+        gen_model = genai.GenerativeModel(model)
+        response = gen_model.generate_content(full_prompt)
+        
+        return {
+            'reply': response.text,
+            'model_used': model,
+            'provider': 'google',
+            'tokens': 0,  # Google doesn't always provide token count
+            'status': 'success'
+        }
+    
+    except ImportError:
+        return {
+            'reply': f"[Google {model}] google-generativeai library not installed",
+            'model_used': model,
+            'provider': 'google',
+            'tokens': 0,
+            'status': 'error',
+            'error': 'Library not installed'
+        }
+    except Exception as e:
+        return {
+            'reply': f"[Google {model}] Error: {str(e)}",
+            'model_used': model,
+            'provider': 'google',
+            'tokens': 0,
+            'status': 'error',
+            'error': str(e)
+        }
 
 
 def call_groq(model: str, prompt: str) -> Dict[str, Any]:

@@ -41,15 +41,14 @@ class MemoryService:
             print(f"Error storing memory: {e}")
             return False
     
-    def search(self, query: str, top_k: int = 5, conversation_id: str = None, include_global: bool = True) -> List[Dict]:
+    def search(self, query: str, top_k: int = 5, workspace_id: str = None) -> List[Dict]:
         """
         Search for similar memories using TF-IDF cosine similarity
         
         Args:
             query: Search query text
             top_k: Number of top results to return
-            conversation_id: Optional filter by conversation
-            include_global: Include team-global memories in search
+            workspace_id: Optional filter by workspace
             
         Returns:
             List of dicts with memory data and similarity scores
@@ -58,16 +57,9 @@ class MemoryService:
             # Get memories from database
             memories_qs = Memory.objects.all()
             
-            if conversation_id:
-                if include_global:
-                    # Include both conversation-specific and team-global memories
-                    from django.db.models import Q
-                    memories_qs = memories_qs.filter(
-                        Q(conversation_id=conversation_id) | Q(scope='team-global')
-                    )
-                else:
-                    # Only conversation-specific
-                    memories_qs = memories_qs.filter(conversation_id=conversation_id)
+            if workspace_id:
+                # Filter by workspace
+                memories_qs = memories_qs.filter(workspace_id=workspace_id)
             
             memories = list(memories_qs)
             
@@ -102,11 +94,12 @@ class MemoryService:
                     memory = memories[idx]
                     results.append({
                         'id': memory.id,
-                        'text': memory.text,
+                        'title': memory.title,
+                        'content': memory.content,
+                        'snippet': memory.snippet,
                         'score': float(similarities[idx]),
                         'tags': memory.tags,
-                        'conversation_id': memory.conversation_id,
-                        'scope': memory.scope,
+                        'workspace_id': memory.workspace_id,
                         'created_at': memory.created_at.isoformat()
                     })
             

@@ -134,7 +134,7 @@ def main():
         print("  1. Start server: python manage.py runserver")
         print("  2. Visit: http://localhost:8000/api/health")
         print("  3. Check API docs: http://localhost:8000/swagger/")
-        print("  4. Read QUICKSTART.md for demo workflow")
+        print("  4. Read README.md for complete guide")
     else:
         print("⚠️  Some checks failed. Please fix the issues above.")
         print()
