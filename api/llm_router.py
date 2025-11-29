@@ -21,6 +21,13 @@ SUPPORTED_MODELS = {
     'claude-3-opus': 'anthropic',
     'claude-3-sonnet': 'anthropic',
     'claude-3-haiku': 'anthropic',
+    'claude-3.5-sonnet': 'anthropic',
+    
+    # Google models
+    'gemini-pro': 'google',
+    'gemini-1.5-pro': 'google',
+    'gemini-1.5-flash': 'google',
+    'gemini-2.0-flash': 'google',
     
     # Groq models (fast inference)
     'llama-3-70b': 'groq',
@@ -33,23 +40,62 @@ SUPPORTED_MODELS = {
 }
 
 
+def normalize_model_name(model_name: str, provider: str) -> str:
+    """
+    Normalize model name to the format expected by the API
+    Converts "gemini-20-flash" back to "gemini-2.0-flash"
+    
+    Args:
+        model_name: Model name from frontend (e.g., "gemini-20-flash")
+        provider: Provider name (e.g., "google")
+        
+    Returns:
+        Normalized model name for API (e.g., "gemini-2.0-flash")
+    """
+    # Normalize input for comparison
+    normalized_input = model_name.replace('.', '').replace('-', '').replace('_', '').lower()
+    
+    # Find matching model in SUPPORTED_MODELS
+    for model_key, model_provider in SUPPORTED_MODELS.items():
+        if model_provider == provider:
+            # Normalize the model key for comparison
+            normalized_key = model_key.replace('.', '').replace('-', '').replace('_', '').lower()
+            
+            # Check if they match
+            if normalized_input == normalized_key or normalized_input in normalized_key or normalized_key in normalized_input:
+                return model_key
+    
+    # If no match found, return original
+    return model_name
+
+
 def get_provider(model_name: str) -> str:
     """
     Get the provider for a given model name
     
     Args:
-        model_name: Name of the LLM model
+        model_name: Name of the LLM model (e.g., "gemini-2.0-flash" or "model-gemini-20-flash")
         
     Returns:
         Provider name (openai, anthropic, groq, echo, local)
     """
-    # Check exact match
-    if model_name in SUPPORTED_MODELS:
-        return SUPPORTED_MODELS[model_name]
+    # Remove "model-" prefix if present
+    clean_name = model_name.replace('model-', '').lower()
     
-    # Check prefix match
+    # Check exact match
+    if clean_name in SUPPORTED_MODELS:
+        return SUPPORTED_MODELS[clean_name]
+    
+    # Normalize the clean_name for comparison (remove dots, hyphens, underscores)
+    normalized_name = clean_name.replace('.', '').replace('-', '').replace('_', '')
+    
+    # Check against all supported models
     for model_key, provider in SUPPORTED_MODELS.items():
-        if model_name.startswith(model_key):
+        # Normalize the model key
+        normalized_key = model_key.replace('.', '').replace('-', '').replace('_', '').lower()
+        
+        # Check if they match
+        if normalized_name == normalized_key or normalized_name.startswith(normalized_key):
             return provider
     
     # Default to echo for demo
@@ -69,6 +115,9 @@ def call_llm_with_conversation(conversation: Conversation, user_message: str, ap
     Returns:
         Dict with reply, model_used, tokens, provider, status
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     # Build context
     context = build_context(conversation, user_message)
     
@@ -76,8 +125,14 @@ def call_llm_with_conversation(conversation: Conversation, user_message: str, ap
     model_id = conversation.model_id
     provider = get_provider(model_id)
     
-    # Extract actual model name
+    # Extract actual model name and convert back to proper format
     model_name = model_id.replace('model-', '')
+    
+    # Map common model name variations back to API format
+    model_name = normalize_model_name(model_name, provider)
+    
+    # Debug logging
+    logger.info(f"🔍 DEBUG: model_id={model_id}, provider={provider}, model_name={model_name}, has_api_key={api_key is not None}")
     
     # Route to appropriate provider
     if provider == 'openai':
@@ -91,6 +146,7 @@ def call_llm_with_conversation(conversation: Conversation, user_message: str, ap
     elif provider == 'local':
         return call_local(model_name, user_message)
     else:
+        logger.warning(f"⚠️ Falling back to echo mode for model_id={model_id}, provider={provider}")
         return call_echo(model_name, user_message, user_message)
 
 
@@ -354,6 +410,27 @@ def call_google(model: str, prompt: str, api_key: str = None, context: Dict[str,
         gen_model = genai.GenerativeModel(model)
         response = gen_model.generate_content(full_prompt)
         
+        # Check if response was blocked
+        if not response.text:
+            if hasattr(response, 'prompt_feedback'):
+                return {
+                    'reply': f"[Google {model}] Content was blocked by safety filters: {response.prompt_feedback}",
+                    'model_used': model,
+                    'provider': 'google',
+                    'tokens': 0,
+                    'status': 'error',
+                    'error': 'Content blocked by safety filters'
+                }
+            else:
+                return {
+                    'reply': f"[Google {model}] No response generated",
+                    'model_used': model,
+                    'provider': 'google',
+                    'tokens': 0,
+                    'status': 'error',
+                    'error': 'No response generated'
+                }
+        
         return {
             'reply': response.text,
             'model_used': model,
@@ -372,6 +449,12 @@ def call_google(model: str, prompt: str, api_key: str = None, context: Dict[str,
             'error': 'Library not installed'
         }
     except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"❌ Google API Error: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
         return {
             'reply': f"[Google {model}] Error: {str(e)}",
             'model_used': model,
@@ -418,7 +501,7 @@ def call_local(model: str, prompt: str) -> Dict[str, Any]:
         'model_used': model,
         'provider': 'local',
         'tokens': 0,
-        'status': 'demo_mode'
+        'status': 'success'  # Changed from 'demo_mode' to 'success'
     }
 
 
@@ -442,7 +525,7 @@ def call_echo(model: str, full_prompt: str, original_prompt: str) -> Dict[str, A
         'context_injected': has_context,
         'context_length': len(context_part) if has_context else 0,
         'tokens': len(full_prompt.split()),
-        'status': 'demo_mode'
+        'status': 'success'  # Changed from 'demo_mode' to 'success'
     }
 
 

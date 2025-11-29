@@ -55,23 +55,38 @@ def integrations_view(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Test the API connection before saving
+        test_result = _test_provider_connection(provider, api_key)
+        
         # Encrypt API key before storage
         encrypted_key = encrypt_api_key(api_key)
         
-        # Create integration
+        # Create integration with status based on test result
         integration = Integration.objects.create(
             user=request.user,
             provider=provider,
             api_key=encrypted_key,
-            status='disconnected'
+            status='connected' if test_result['success'] else 'error',
+            last_tested=timezone.now(),
+            error_message=test_result.get('error')
         )
         
         response_serializer = IntegrationSerializer(integration)
         
-        return Response(
-            api_response(ok=True, data=response_serializer.data),
-            status=status.HTTP_201_CREATED
-        )
+        if test_result['success']:
+            return Response(
+                api_response(ok=True, data=response_serializer.data),
+                status=status.HTTP_201_CREATED
+            )
+        else:
+            return Response(
+                api_response(
+                    ok=False,
+                    error=f"Integration created but connection test failed: {test_result.get('error', 'Unknown error')}",
+                    data=response_serializer.data
+                ),
+                status=status.HTTP_201_CREATED
+            )
 
 
 @api_view(['GET', 'PUT', 'DELETE'])

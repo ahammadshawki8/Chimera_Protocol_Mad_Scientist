@@ -185,6 +185,13 @@ class MessageCreateSerializer(serializers.Serializer):
     """Serializer for creating a message"""
     content = serializers.CharField()
     role = serializers.ChoiceField(choices=['user', 'assistant', 'system'], default='user')
+    getAiResponse = serializers.BooleanField(required=False, default=True)
+    
+    class Meta:
+        # Allow extra fields to be passed through
+        extra_kwargs = {
+            'getAiResponse': {'write_only': True}
+        }
 
 
 # Conversation Serializers

@@ -195,66 +195,92 @@ def send_message_view(request, conversation_id):
                 from .llm_router import get_provider, call_llm_with_conversation
                 from .encryption_service import decrypt_api_key
                 from .models import Integration
+                import logging
+                
+                logger = logging.getLogger(__name__)
                 
                 provider = get_provider(conversation.model_id)
+                logger.info(f"🔍 Model ID: {conversation.model_id}, Provider: {provider}")
                 
-                # Get user's integration for this provider
-                try:
-                    integration = Integration.objects.get(
-                        user=request.user,
-                        provider=provider,
-                        status='connected'
-                    )
-                    
-                    # Decrypt API key
-                    api_key = decrypt_api_key(integration.api_key)
-                    
-                    # Call AI model
-                    ai_response = call_llm_with_conversation(
-                        conversation=conversation,
-                        user_message=user_content,
-                        api_key=api_key
-                    )
-                    
-                    if ai_response['status'] == 'success':
-                        # Create assistant message
-                        assistant_message = ChatMessage.objects.create(
-                            conversation=conversation,
-                            role='assistant',
-                            content=ai_response['reply'],
-                            is_pinned=False,
-                            metadata={
-                                'tokens': ai_response.get('tokens', 0),
-                                'model_version': ai_response.get('model_used', conversation.model_id),
-                                'provider': ai_response.get('provider', provider)
-                            }
+                # For echo/local providers, no integration needed
+                if provider in ['echo', 'local']:
+                    api_key = None
+                    logger.info(f"✅ Using {provider} mode (no API key needed)")
+                else:
+                    # Get user's integration for this provider
+                    try:
+                        integration = Integration.objects.get(
+                            user=request.user,
+                            provider=provider,
+                            status='connected'
                         )
                         
-                        # Log activity
-                        log_message_sent(workspace, conversation, assistant_message)
-                    else:
-                        # AI call failed, return error in response
-                        error_msg = ai_response.get('error', 'AI call failed')
+                        logger.info(f"✅ Found connected integration for {provider}")
+                        
+                        # Decrypt API key
+                        api_key = decrypt_api_key(integration.api_key)
+                        logger.info(f"✅ API key decrypted successfully")
+                    except Integration.DoesNotExist:
+                        # No integration found for provider
+                        logger.error(f"❌ No connected integration found for provider: {provider}")
                         response_serializer = MessageSerializer(user_message)
                         return Response(
                             api_response(
                                 ok=False,
-                                error=f"AI response failed: {error_msg}",
+                                error=f"No connected integration found for provider: {provider}",
                                 data={'userMessage': response_serializer.data}
                             ),
-                            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                            status=status.HTTP_400_BAD_REQUEST
                         )
                 
-                except Integration.DoesNotExist:
-                    # No integration found for provider
+                # Call AI model
+                ai_response = call_llm_with_conversation(
+                    conversation=conversation,
+                    user_message=user_content,
+                    api_key=api_key
+                )
+                
+                if ai_response['status'] == 'success':
+                    # Create assistant message
+                    assistant_message = ChatMessage.objects.create(
+                        conversation=conversation,
+                        role='assistant',
+                        content=ai_response['reply'],
+                        is_pinned=False,
+                        metadata={
+                            'tokens': ai_response.get('tokens', 0),
+                            'model_version': ai_response.get('model_used', conversation.model_id),
+                            'provider': ai_response.get('provider', provider)
+                        }
+                    )
+                    
+                    # Log activity
+                    log_message_sent(workspace, conversation, assistant_message)
+                    
+                    # Auto-extract and save memories
+                    try:
+                        from .memory_extractor import auto_extract_and_save
+                        created_memories = auto_extract_and_save(
+                            user_message=user_content,
+                            llm_reply=ai_response['reply'],
+                            conversation=conversation,
+                            model_used=ai_response.get('model_used', conversation.model_id)
+                        )
+                        if created_memories:
+                            logger.info(f"✅ Auto-extracted {len(created_memories)} memories from conversation")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to auto-extract memories: {str(e)}")
+                else:
+                    # AI call failed, return error in response
+                    error_msg = ai_response.get('error', 'AI call failed')
                     response_serializer = MessageSerializer(user_message)
                     return Response(
                         api_response(
                             ok=False,
-                            error=f"No connected integration found for provider: {provider}",
+                            error=f"AI response failed: {error_msg}",
                             data={'userMessage': response_serializer.data}
                         ),
-                        status=status.HTTP_400_BAD_REQUEST
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
                     )
             
             except Exception as e:
