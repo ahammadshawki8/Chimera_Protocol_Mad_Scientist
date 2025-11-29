@@ -109,8 +109,7 @@ exc.detail) if hasattr(exc, 'detail') else str(exc)
     return Response(
         api_response(
             ok=False,
-            error="Inter
-nal server error"
+            error="Internal server error"
         ),
         status=status.HTTP_500_INTERNAL_SERVER_ERROR
     )

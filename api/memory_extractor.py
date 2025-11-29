@@ -43,6 +43,9 @@ def should_save_memory(user_message: str, llm_reply: str) -> Tuple[bool, str]:
     Returns:
         Tuple of (should_save, importance_level)
     """
+    # Always save conversations to build context
+    # This ensures every meaningful exchange is captured
+    
     # Check for explicit save requests
     save_keywords = ['remember', 'save', 'store', 'keep', 'note']
     if any(keyword in user_message.lower() for keyword in save_keywords):
@@ -64,7 +67,11 @@ def should_save_memory(user_message: str, llm_reply: str) -> Tuple[bool, str]:
             return True, 'medium'
     
     # Check message length (longer messages often contain important info)
-    if len(user_message.split()) > 20:
+    if len(user_message.split()) > 10:
+        return True, 'medium'
+    
+    # Save shorter messages as low priority
+    if len(user_message.split()) > 3:
         return True, 'low'
     
     return False, 'none'
@@ -199,20 +206,21 @@ def calculate_importance_score(text: str, context: Dict = None) -> float:
     return min(score, 1.0)
 
 
-def auto_extract_and_save(user_message: str, llm_reply: str, conversation_id: str, model_used: str = None):
+def auto_extract_and_save(user_message: str, llm_reply: str, conversation, model_used: str = None):
     """
     Automatically extract and save important information from conversation
     
     Args:
         user_message: User's message
         llm_reply: LLM's response
-        conversation_id: Conversation ID
+        conversation: Conversation object
         model_used: Model that generated the reply
         
     Returns:
         List of created memory objects
     """
     from .models import Memory
+    from .memory_service import memory_service
     
     created_memories = []
     
@@ -229,38 +237,55 @@ def auto_extract_and_save(user_message: str, llm_reply: str, conversation_id: st
         tags = generate_tags(fact['text'])
         importance_score = calculate_importance_score(fact['text'])
         
+        # Create title from first 50 chars
+        title = fact['text'][:50] + ('...' if len(fact['text']) > 50 else '')
+        
         memory = Memory.objects.create(
-            text=fact['text'],
-            conversation_id=conversation_id,
+            workspace=conversation.workspace,
+            title=title,
+            content=fact['text'],
             tags=tags,
-            scope='conversation',
             metadata={
                 'source': 'user',
                 'auto_extracted': True,
                 'importance': importance,
                 'importance_score': importance_score,
                 'extraction_type': fact['type'],
-                'model_used': model_used
+                'model_used': model_used,
+                'conversation_id': conversation.id
             }
         )
+        
+        # Store in search index
+        memory_service.store(memory.content, memory.id)
+        
         created_memories.append(memory)
     
     # Save full exchange if high importance
     if importance == 'high':
         tags = generate_tags(user_message + ' ' + llm_reply)
+        exchange_text = f"User: {user_message}\n\nAssistant: {llm_reply}"
+        
+        # Create title from user message
+        title = f"Important: {user_message[:40]}..." if len(user_message) > 40 else f"Important: {user_message}"
         
         memory = Memory.objects.create(
-            text=f"User: {user_message}\nAssistant ({model_used}): {llm_reply}",
-            conversation_id=conversation_id,
+            workspace=conversation.workspace,
+            title=title,
+            content=exchange_text,
             tags=tags + ['full-exchange', 'high-importance'],
-            scope='conversation',
             metadata={
                 'source': 'exchange',
                 'auto_extracted': True,
                 'importance': importance,
-                'model_used': model_used
+                'model_used': model_used,
+                'conversation_id': conversation.id
             }
         )
+        
+        # Store in search index
+        memory_service.store(memory.content, memory.id)
+        
         created_memories.append(memory)
     
     return created_memories
