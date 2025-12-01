@@ -556,9 +556,8 @@ def close_conversation_view(request, conversation_id):
                 
                 full_text = "\n\n".join(conversation_text)
                 
-                # Generate summary title
-                first_user_msg = next((msg.content for msg in messages if msg.role == 'user'), '')
-                title = f"Conversation: {first_user_msg[:50]}..." if len(first_user_msg) > 50 else f"Conversation: {first_user_msg}"
+                # Use conversation title as memory title
+                title = conversation.title
                 
                 # Extract key topics for tags
                 from .memory_extractor import generate_tags

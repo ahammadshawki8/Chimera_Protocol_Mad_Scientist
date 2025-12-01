@@ -77,20 +77,12 @@ def integrations_view(request):
         
         response_serializer = IntegrationSerializer(integration)
         
-        if test_result['success']:
-            return Response(
-                api_response(ok=True, data=response_serializer.data),
-                status=status.HTTP_201_CREATED
-            )
-        else:
-            return Response(
-                api_response(
-                    ok=False,
-                    error=f"Integration created but connection test failed: {test_result.get('error', 'Unknown error')}",
-                    data=response_serializer.data
-                ),
-                status=status.HTTP_201_CREATED
-            )
+        # Always return ok=True since the integration was created successfully
+        # The integration status field indicates whether the connection test passed
+        return Response(
+            api_response(ok=True, data=response_serializer.data),
+            status=status.HTTP_201_CREATED
+        )
 
 
 @api_view(['GET', 'PUT', 'DELETE'])
@@ -167,23 +159,16 @@ def test_integration_view(request, integration_id):
         
         serializer = IntegrationSerializer(integration)
         
-        if test_result['success']:
-            return Response(api_response(
-                ok=True,
-                data={
-                    'integration': serializer.data,
-                    'message': 'Connection test successful'
-                }
-            ))
-        else:
-            return Response(
-                api_response(
-                    ok=False,
-                    error=test_result.get('error', 'Connection test failed'),
-                    data={'integration': serializer.data}
-                ),
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        # Always return 200 - the test completed, even if the connection failed
+        # The integration status and error message indicate the result
+        return Response(api_response(
+            ok=True,
+            data={
+                'integration': serializer.data,
+                'message': 'Connection test successful' if test_result['success'] else test_result.get('error', 'Connection test failed'),
+                'success': test_result['success']
+            }
+        ))
     
     except Integration.DoesNotExist:
         return Response(
@@ -275,17 +260,12 @@ def _test_provider_connection(provider, api_key):
                 return {'success': False, 'error': f'API returned status {response.status_code}'}
         
         elif provider == 'deepseek':
-            # Test DeepSeek API (OpenAI-compatible)
-            response = requests.post(
-                'https://api.deepseek.com/chat/completions',
+            # Test DeepSeek API using /models endpoint (doesn't consume credits)
+            # DeepSeek uses OpenAI-compatible API at api.deepseek.com
+            response = requests.get(
+                'https://api.deepseek.com/models',
                 headers={
                     'Authorization': f'Bearer {api_key}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'model': 'deepseek-chat',
-                    'messages': [{'role': 'user', 'content': 'test'}],
-                    'max_tokens': 1
                 },
                 timeout=10
             )
@@ -296,6 +276,9 @@ def _test_provider_connection(provider, api_key):
                 return {'success': True}
             elif response.status_code == 401:
                 return {'success': False, 'error': 'Invalid API key'}
+            elif response.status_code == 402:
+                # 402 means valid key but insufficient balance
+                return {'success': True}  # Key is valid, just no credits
             else:
                 error_detail = response.text[:200] if response.text else 'No details'
                 logger.error(f"❌ DeepSeek API error: {response.status_code} - {error_detail}")
@@ -338,34 +321,40 @@ def available_models_view(request):
         status='connected'
     )
     
+    # Primary model for each provider (shown in 3D brain)
+    PRIMARY_MODELS = {
+        'openai': 'gpt-4o',
+        'anthropic': 'claude-3.5-sonnet',
+        'google': 'gemini-2.0-flash',
+        'deepseek': 'deepseek-chat',
+        'groq': 'llama-3-70b',
+    }
+    
     # Build list of available models from connected integrations
+    # Only show the primary model for each provider
     available_models = []
     
     for integration in connected_integrations:
         provider = integration.provider
         
-        # Get all models for this provider from SUPPORTED_MODELS
-        provider_models = [
-            model_name for model_name, model_provider in SUPPORTED_MODELS.items()
-            if model_provider == provider
-        ]
+        # Get the primary model for this provider
+        primary_model = PRIMARY_MODELS.get(provider)
         
-        # Create cognitive model object for each model
-        for model_name in provider_models:
+        if primary_model:
             # Generate display name (capitalize and replace hyphens with spaces)
-            display_name = model_name.replace('-', ' ').title()
+            display_name = primary_model.replace('-', ' ').title()
             
-            # Create model ID - keep original format with dots (e.g., "model-gemini-2.0-flash")
-            model_id = f"model-{model_name}"
+            # Create model ID
+            model_id = f"model-{primary_model}"
             
             available_models.append({
                 'id': model_id,
                 'provider': provider,
-                'name': model_name,
+                'name': primary_model,
                 'displayName': display_name,
                 'brainRegion': get_brain_region(provider),
                 'status': 'connected',
-                'position': get_model_position(provider)
+                'position': get_model_position(provider, len(available_models))
             })
     
     return Response(api_response(
@@ -390,14 +379,29 @@ def get_brain_region(provider):
     return regions.get(provider, 'Unknown')
 
 
-def get_model_position(provider):
-    """Get 3D position for model in brain visualization"""
+def get_model_position(provider, index=0):
+    """Get 3D position for model on brain sphere surface (radius ~2.2)"""
+    import math
+    
+    # Positions on sphere surface (radius 2.2)
+    # Using spherical coordinates converted to cartesian
+    radius = 2.2
+    
     positions = {
-        'openai': {'x': -2, 'y': 1, 'z': 1},
-        'anthropic': {'x': 2, 'y': 1, 'z': 1},
-        'google': {'x': 0, 'y': -1, 'z': 2},
-        'deepseek': {'x': 0, 'y': 2, 'z': 0},
-        'groq': {'x': -1, 'y': 0, 'z': -1},
-        'echo': {'x': 0, 'y': 0, 'z': 0}
+        'openai': {'x': -1.8, 'y': 0.8, 'z': 1.0},      # Left upper front
+        'anthropic': {'x': 1.8, 'y': 0.8, 'z': 1.0},    # Right upper front
+        'google': {'x': 0, 'y': -1.2, 'z': 1.8},        # Bottom front
+        'deepseek': {'x': 0, 'y': 1.8, 'z': 1.2},       # Top front
+        'groq': {'x': -1.5, 'y': -0.5, 'z': 1.5},       # Left lower front
+        'echo': {'x': 0, 'y': 0, 'z': 2.2}              # Center front
     }
-    return positions.get(provider, {'x': 0, 'y': 0, 'z': 0})
+    
+    pos = positions.get(provider, {'x': 0, 'y': 0, 'z': 2.2})
+    
+    # Normalize to sphere surface
+    length = math.sqrt(pos['x']**2 + pos['y']**2 + pos['z']**2)
+    if length > 0:
+        scale = radius / length
+        pos = {'x': pos['x'] * scale, 'y': pos['y'] * scale, 'z': pos['z'] * scale}
+    
+    return pos

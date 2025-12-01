@@ -180,7 +180,7 @@ class IntegrationSerializer(serializers.ModelSerializer):
 
 class IntegrationCreateSerializer(serializers.Serializer):
     """Serializer for creating an integration"""
-    provider = serializers.ChoiceField(choices=['openai', 'anthropic', 'google'])
+    provider = serializers.ChoiceField(choices=['openai', 'anthropic', 'google', 'deepseek'])
     apiKey = serializers.CharField(min_length=10, max_length=500)
 
 
