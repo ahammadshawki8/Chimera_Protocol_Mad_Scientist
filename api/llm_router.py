@@ -47,29 +47,25 @@ SUPPORTED_MODELS = {
 def normalize_model_name(model_name: str, provider: str) -> str:
     """
     Normalize model name to the format expected by the API
-    Converts "gemini-20-flash" back to "gemini-2.0-flash"
     
     Args:
-        model_name: Model name from frontend (e.g., "gemini-20-flash")
+        model_name: Model name from frontend (e.g., "gemini-1.5-flash")
         provider: Provider name (e.g., "google")
         
     Returns:
-        Normalized model name for API (e.g., "gemini-2.0-flash")
+        Normalized model name for API (e.g., "gemini-1.5-flash")
     """
-    # Normalize input for comparison (remove all separators)
-    normalized_input = model_name.replace('.', '').replace('-', '').replace('_', '').lower()
+    # First check for exact match in SUPPORTED_MODELS
+    if model_name in SUPPORTED_MODELS:
+        return model_name
     
-    # Find matching model in SUPPORTED_MODELS
-    for model_key, model_provider in SUPPORTED_MODELS.items():
-        if model_provider == provider:
-            # Normalize the model key for comparison (remove all separators)
-            normalized_key = model_key.replace('.', '').replace('-', '').replace('_', '').lower()
-            
-            # Check if they match exactly
-            if normalized_input == normalized_key:
-                return model_key
+    # Check case-insensitive exact match
+    model_name_lower = model_name.lower()
+    for model_key in SUPPORTED_MODELS.keys():
+        if model_key.lower() == model_name_lower:
+            return model_key
     
-    # If no exact match found, return original
+    # If no exact match found, return original (the API will handle it)
     return model_name
 
 

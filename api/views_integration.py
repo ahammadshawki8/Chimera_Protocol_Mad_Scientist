@@ -321,41 +321,42 @@ def available_models_view(request):
         status='connected'
     )
     
-    # Primary model for each provider (shown in 3D brain)
-    PRIMARY_MODELS = {
-        'openai': 'gpt-4o',
-        'anthropic': 'claude-3.5-sonnet',
-        'google': 'gemini-2.0-flash',
-        'deepseek': 'deepseek-chat',
-        'groq': 'llama-3-70b',
+    # All models available for each provider
+    PROVIDER_MODELS = {
+        'openai': ['gpt-4o', 'gpt-4', 'gpt-4-turbo', 'gpt-3.5-turbo'],
+        'anthropic': ['claude-3.5-sonnet', 'claude-3-opus', 'claude-3-sonnet', 'claude-3-haiku'],
+        'google': ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'],
+        'deepseek': ['deepseek-chat', 'deepseek-coder'],
+        'groq': ['llama-3-70b', 'llama-3-8b', 'mixtral-8x7b'],
     }
     
     # Build list of available models from connected integrations
-    # Only show the primary model for each provider
     available_models = []
+    model_index = 0
     
     for integration in connected_integrations:
         provider = integration.provider
         
-        # Get the primary model for this provider
-        primary_model = PRIMARY_MODELS.get(provider)
+        # Get all models for this provider
+        provider_models = PROVIDER_MODELS.get(provider, [])
         
-        if primary_model:
+        for model_name in provider_models:
             # Generate display name (capitalize and replace hyphens with spaces)
-            display_name = primary_model.replace('-', ' ').title()
+            display_name = model_name.replace('-', ' ').title()
             
-            # Create model ID
-            model_id = f"model-{primary_model}"
+            # Create model ID (preserve dots in model names)
+            model_id = f"model-{model_name}"
             
             available_models.append({
                 'id': model_id,
                 'provider': provider,
-                'name': primary_model,
+                'name': model_name,
                 'displayName': display_name,
                 'brainRegion': get_brain_region(provider),
                 'status': 'connected',
-                'position': get_model_position(provider, len(available_models))
+                'position': get_model_position(provider, model_index)
             })
+            model_index += 1
     
     return Response(api_response(
         ok=True,
