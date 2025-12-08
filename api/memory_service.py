@@ -1,49 +1,21 @@
 """
-Memory service for vector-based semantic search using TF-IDF
+Memory service for text-based search
+Optimized for low memory usage - uses simple keyword matching instead of TF-IDF
 """
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
-from typing import List, Tuple, Dict
+import re
+from typing import List, Dict
 from .models import Memory
 
 
 class MemoryService:
     """
-    Service for storing and searching memories using TF-IDF vectorization
+    Lightweight memory search service using keyword matching
+    No heavy dependencies (scikit-learn, numpy removed)
     """
-    
-    def __init__(self):
-        self.vectorizer = TfidfVectorizer(
-            max_features=1000,
-            stop_words='english',
-            ngram_range=(1, 2)
-        )
-        self._corpus = []
-        self._memory_ids = []
-    
-    def store(self, text: str, memory_id: int) -> bool:
-        """
-        Store a memory text with its ID
-        
-        Args:
-            text: The memory text content
-            memory_id: Database ID of the memory
-            
-        Returns:
-            bool: Success status
-        """
-        try:
-            self._corpus.append(text)
-            self._memory_ids.append(memory_id)
-            return True
-        except Exception as e:
-            print(f"Error storing memory: {e}")
-            return False
     
     def search(self, query: str, top_k: int = 5, workspace_id: str = None) -> List[Dict]:
         """
-        Search for similar memories using TF-IDF cosine similarity
+        Search for similar memories using keyword matching
         
         Args:
             query: Search query text
@@ -51,57 +23,49 @@ class MemoryService:
             workspace_id: Optional filter by workspace
             
         Returns:
-            List of dicts with memory data and similarity scores
+            List of dicts with memory data and relevance scores
         """
         try:
             # Get memories from database
             memories_qs = Memory.objects.all()
             
             if workspace_id:
-                # Filter by workspace
                 memories_qs = memories_qs.filter(workspace_id=workspace_id)
             
-            memories = list(memories_qs)
+            memories = list(memories_qs[:100])  # Limit to 100 for performance
             
             if not memories:
                 return []
             
-            # Build corpus from memories
-            texts = [m.text for m in memories]
+            # Tokenize query
+            query_tokens = self._tokenize(query.lower())
             
-            # Add query to corpus for vectorization
-            all_texts = texts + [query]
+            if not query_tokens:
+                return []
             
-            # Compute TF-IDF vectors
-            tfidf_matrix = self.vectorizer.fit_transform(all_texts)
+            # Score each memory
+            scored_memories = []
+            for memory in memories:
+                score = self._calculate_score(query_tokens, memory)
+                if score > 0:
+                    scored_memories.append((memory, score))
             
-            # Query vector is the last one
-            query_vector = tfidf_matrix[-1]
+            # Sort by score descending
+            scored_memories.sort(key=lambda x: x[1], reverse=True)
             
-            # Document vectors are all except the last
-            doc_vectors = tfidf_matrix[:-1]
-            
-            # Compute cosine similarity
-            similarities = cosine_similarity(query_vector, doc_vectors).flatten()
-            
-            # Get top-k indices
-            top_indices = np.argsort(similarities)[::-1][:top_k]
-            
-            # Build results
+            # Return top-k results
             results = []
-            for idx in top_indices:
-                if similarities[idx] > 0:  # Only include non-zero similarities
-                    memory = memories[idx]
-                    results.append({
-                        'id': memory.id,
-                        'title': memory.title,
-                        'content': memory.content,
-                        'snippet': memory.snippet,
-                        'score': float(similarities[idx]),
-                        'tags': memory.tags,
-                        'workspace_id': memory.workspace_id,
-                        'created_at': memory.created_at.isoformat()
-                    })
+            for memory, score in scored_memories[:top_k]:
+                results.append({
+                    'id': memory.id,
+                    'title': memory.title,
+                    'content': memory.content[:500],  # Truncate for memory efficiency
+                    'snippet': memory.snippet,
+                    'score': score,
+                    'tags': memory.tags,
+                    'workspace_id': memory.workspace_id,
+                    'created_at': memory.created_at.isoformat()
+                })
             
             return results
             
@@ -109,17 +73,49 @@ class MemoryService:
             print(f"Error searching memories: {e}")
             return []
     
-    def rebuild_index(self):
-        """
-        Rebuild the search index from database
-        """
-        self._corpus = []
-        self._memory_ids = []
+    def _tokenize(self, text: str) -> set:
+        """Simple tokenization - split on non-alphanumeric chars"""
+        # Remove special chars and split
+        words = re.findall(r'\b\w+\b', text.lower())
+        # Filter short words and common stop words
+        stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 
+                      'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will',
+                      'would', 'could', 'should', 'may', 'might', 'must', 'shall',
+                      'can', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by',
+                      'from', 'as', 'into', 'through', 'during', 'before', 'after',
+                      'above', 'below', 'between', 'under', 'again', 'further',
+                      'then', 'once', 'here', 'there', 'when', 'where', 'why',
+                      'how', 'all', 'each', 'few', 'more', 'most', 'other', 'some',
+                      'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
+                      'than', 'too', 'very', 'just', 'and', 'but', 'if', 'or',
+                      'because', 'until', 'while', 'this', 'that', 'these', 'those',
+                      'it', 'its', 'i', 'me', 'my', 'we', 'our', 'you', 'your',
+                      'he', 'him', 'his', 'she', 'her', 'they', 'them', 'their'}
+        return {w for w in words if len(w) > 2 and w not in stop_words}
+    
+    def _calculate_score(self, query_tokens: set, memory) -> float:
+        """Calculate relevance score based on keyword overlap"""
+        # Combine title and content
+        memory_text = f"{memory.title} {memory.content}".lower()
+        memory_tokens = self._tokenize(memory_text)
         
-        memories = Memory.objects.all().order_by('id')
-        for memory in memories:
-            self._corpus.append(memory.text)
-            self._memory_ids.append(memory.id)
+        if not memory_tokens:
+            return 0.0
+        
+        # Calculate Jaccard-like similarity
+        intersection = query_tokens & memory_tokens
+        if not intersection:
+            return 0.0
+        
+        # Score based on matches, weighted by title matches
+        title_tokens = self._tokenize(memory.title.lower())
+        title_matches = len(query_tokens & title_tokens)
+        content_matches = len(intersection) - title_matches
+        
+        # Title matches worth more
+        score = (title_matches * 2.0 + content_matches) / len(query_tokens)
+        
+        return min(score, 1.0)  # Cap at 1.0
 
 
 # Global instance
