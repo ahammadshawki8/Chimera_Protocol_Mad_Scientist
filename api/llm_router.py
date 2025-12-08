@@ -244,13 +244,23 @@ def call_google(model: str, api_key: str, context: Dict[str, Any]) -> Dict[str, 
         return error_response(model, 'google', 'No API key provided')
     
     try:
-        # Build contents for Gemini
-        contents = []
+        # Map model names to actual Google API model IDs
+        # Google requires specific model names - use latest stable versions
+        model_map = {
+            'gemini-2.0-flash': 'gemini-2.0-flash',
+            'gemini-2.0-flash-exp': 'gemini-2.0-flash-exp',
+            'gemini-1.5-flash': 'gemini-1.5-flash-latest',
+            'gemini-1.5-pro': 'gemini-1.5-pro-latest',
+        }
+        api_model = model_map.get(model, 'gemini-2.0-flash')
         
-        # Add system instruction as first user turn
+        # Build system instruction
         system_text = context['system_prompt']
         if context['memories_text']:
             system_text += context['memories_text']
+        
+        # Build contents for Gemini
+        contents = []
         
         # Add history
         for msg in context['history']:
@@ -260,29 +270,30 @@ def call_google(model: str, api_key: str, context: Dict[str, Any]) -> Dict[str, 
                 'parts': [{'text': msg.content}]
             })
         
-        # Add current message with system context if first message
-        user_text = context['user_message']
-        if not contents:
-            user_text = f"{system_text}\n\nUser: {user_text}"
-        
+        # Add current message
         contents.append({
             'role': 'user',
-            'parts': [{'text': user_text}]
+            'parts': [{'text': context['user_message']}]
         })
         
-        # Use v1beta API endpoint
-        url = f'https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}'
+        # Use v1beta API endpoint with system instruction
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/{api_model}:generateContent?key={api_key}'
+        
+        request_body = {
+            'contents': contents,
+            'systemInstruction': {
+                'parts': [{'text': system_text}]
+            },
+            'generationConfig': {
+                'temperature': 0.7,
+                'maxOutputTokens': 2000,
+            }
+        }
         
         response = requests.post(
             url,
             headers={'Content-Type': 'application/json'},
-            json={
-                'contents': contents,
-                'generationConfig': {
-                    'temperature': 0.7,
-                    'maxOutputTokens': 2000,
-                }
-            },
+            json=request_body,
             timeout=60
         )
         
@@ -306,6 +317,10 @@ def call_google(model: str, api_key: str, context: Dict[str, Any]) -> Dict[str, 
         
         elif response.status_code == 429:
             return error_response(model, 'google', 'Rate limit exceeded. Try Groq instead (free).')
+        elif response.status_code == 404:
+            # Model not found - try fallback
+            logger.warning(f"Model {api_model} not found, trying gemini-2.0-flash")
+            return call_google_fallback(api_key, context)
         else:
             try:
                 error_data = response.json()
@@ -318,6 +333,44 @@ def call_google(model: str, api_key: str, context: Dict[str, Any]) -> Dict[str, 
         return error_response(model, 'google', 'Request timeout')
     except Exception as e:
         logger.error(f"Google API error: {str(e)}")
+        return error_response(model, 'google', str(e))
+
+
+def call_google_fallback(api_key: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Fallback to gemini-2.0-flash if other models fail"""
+    try:
+        system_text = context['system_prompt']
+        if context['memories_text']:
+            system_text += context['memories_text']
+        
+        contents = []
+        for msg in context['history']:
+            role = 'user' if msg.role == 'user' else 'model'
+            contents.append({'role': role, 'parts': [{'text': msg.content}]})
+        contents.append({'role': 'user', 'parts': [{'text': context['user_message']}]})
+        
+        url = f'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}'
+        
+        response = requests.post(
+            url,
+            headers={'Content-Type': 'application/json'},
+            json={
+                'contents': contents,
+                'systemInstruction': {'parts': [{'text': system_text}]},
+                'generationConfig': {'temperature': 0.7, 'maxOutputTokens': 2000}
+            },
+            timeout=60
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'candidates' in data and data['candidates']:
+                text = data['candidates'][0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                return {'reply': text, 'model_used': 'gemini-2.0-flash', 'provider': 'google', 'tokens': 0, 'status': 'success'}
+        
+        return error_response('gemini-2.0-flash', 'google', 'Fallback also failed')
+    except Exception as e:
+        return error_response('gemini-2.0-flash', 'google', str(e))
         return error_response(model, 'google', str(e))
 
 
